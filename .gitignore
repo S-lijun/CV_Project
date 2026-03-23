@@ -10,7 +10,9 @@
 
 # Scene
 scene/*
+!scene/.gitkeep
 data/*
+!data/.gitkeep
 
 # No USD files allowed in the repo
 **/*.usd
