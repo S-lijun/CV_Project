@@ -471,7 +471,7 @@ class G1TurningCollector:
                 [f"torque_{i}" for i in range(N)] +
                 [f"action_{i}" for i in range(N)] +
                 ["vx_cmd", "vy_cmd", "yaw_rate_cmd"] +
-                ["target_x", "target_y"]
+                ["target_x", "target_y", "lidar_nearest_obstacle_m"]
             )
             writer.writerow(header)
 
@@ -664,6 +664,12 @@ class G1TurningCollector:
             ranges = np.linalg.norm(lidar_np, axis=1)
             print(f"ranges: {ranges}")
 
+            valid_ranges = ranges[ranges > 0]
+            if valid_ranges.size > 0:
+                lidar_nearest_obstacle_m = float(np.min(valid_ranges))
+            else:
+                lidar_nearest_obstacle_m = float("nan")
+
             # debug 
             print("lidar shape:", lidar_np.shape)
             print("lidar min/max:", ranges.min(), ranges.max())
@@ -689,7 +695,8 @@ class G1TurningCollector:
                 row = np.concatenate([
                     np.array([sim_step, sim_time_s], dtype=np.float64),
                     base_pos, base_quat, base_lin_vel, base_ang_vel,
-                    joint_pos, joint_vel, torques, actions_np, commands_np, target
+                    joint_pos, joint_vel, torques, actions_np, commands_np, target,
+                    np.array([lidar_nearest_obstacle_m], dtype=np.float64),
                 ])
                 writer.writerow(row.tolist())
 

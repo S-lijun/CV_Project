@@ -79,6 +79,16 @@ class G1TurningCollector:
         RL_LIBRARY = "rsl_rl"
         self.collect_data = collect_data
         self.waypoint = np.array(waypoint)
+        # Obstacle center on XY plane (used for region definition).
+        self.obstacle_xy = np.array([2.0, 0.0], dtype=np.float64)
+        # Four circular regions: front / back / left / right.
+        # You only need to tune center and radius values below.
+        self.trajectory_regions = {
+            "front": {"center": np.array([0.0, 0], dtype=np.float64), "r": 0.5},
+            "back": {"center": np.array([3, 0], dtype=np.float64), "r": 0.25},
+            "left": {"center": np.array([2.0, 1.2], dtype=np.float64), "r": 0.35},
+            "right": {"center": np.array([2.0, -1.2], dtype=np.float64), "r": 0.35},
+        }
 
         # --- RL config & checkpoint ---
         agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(TASK, args_cli)
@@ -192,16 +202,15 @@ class G1TurningCollector:
         self.save_every = save_every
 
         # --- Output dirs: data/<timestamp>/ = one trajectory run ---
-        data_parent = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data"))
-        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # ms resolution
-        self.base_dir = os.path.join(data_parent, run_stamp)
-        os.makedirs(self.base_dir, exist_ok=True)
-        self.image_dir = os.path.join(self.base_dir, "images")
-        os.makedirs(self.image_dir, exist_ok=True)
-        self.lidar_dir = os.path.join(self.base_dir, "lidar")
-        os.makedirs(self.lidar_dir, exist_ok=True)
-        self.save_path = os.path.join(self.base_dir, "locomotion_dataset.csv")
-        print(f"[INFO] Trajectory folder: {self.base_dir}")
+        self.data_parent = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data"))
+        self.base_dir = ""
+        self.image_dir = ""
+        self.lidar_dir = ""
+        self.save_path = ""
+        self._create_new_trajectory_output()
+        self.dataset_file = None
+        self.contact_file = None
+        self.contact_writer = None
 
         # --- Robot info ---
         robot = self.env.unwrapped.scene["robot"]
@@ -410,6 +419,68 @@ class G1TurningCollector:
             #color_attr.Set([(0.0, 1.0, 0.0)])  
         print(f"[INFO] Added {len(waypoints)} waypoint markers.")
 
+    def _sample_point_in_region(self, center: np.ndarray, radius: float) -> np.ndarray:
+        """Uniformly sample a point inside a 2D circle."""
+        theta = np.random.uniform(0.0, 2.0 * np.pi)
+        rr = radius * np.sqrt(np.random.uniform(0.0, 1.0))
+        return center + rr * np.array([np.cos(theta), np.sin(theta)], dtype=np.float64)
+
+    def _generate_random_waypoint_sequence(self) -> np.ndarray:
+        """front -> (left/right) -> back; each point sampled in circular region."""
+        front_cfg = self.trajectory_regions["front"]
+        back_cfg = self.trajectory_regions["back"]
+        side_name = np.random.choice(["left", "right"])
+        side_cfg = self.trajectory_regions[side_name]
+
+        front_pt = self._sample_point_in_region(front_cfg["center"], float(front_cfg["r"]))
+        side_pt = self._sample_point_in_region(side_cfg["center"], float(side_cfg["r"]))
+        back_pt = self._sample_point_in_region(back_cfg["center"], float(back_cfg["r"]))
+
+        waypoints = np.stack([front_pt, side_pt, back_pt], axis=0)
+        print(f"[INFO] New trajectory waypoints (side={side_name}): {waypoints}")
+        return waypoints
+
+    def _create_new_trajectory_output(self):
+        """Create a fresh timestamped folder for one trajectory."""
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # ms resolution
+        self.base_dir = os.path.join(self.data_parent, run_stamp)
+        os.makedirs(self.base_dir, exist_ok=True)
+        self.image_dir = os.path.join(self.base_dir, "images")
+        os.makedirs(self.image_dir, exist_ok=True)
+        self.lidar_dir = os.path.join(self.base_dir, "lidar")
+        os.makedirs(self.lidar_dir, exist_ok=True)
+        self.save_path = os.path.join(self.base_dir, "locomotion_dataset.csv")
+        print(f"[INFO] Trajectory folder: {self.base_dir}")
+
+    def _open_data_writers(self, header):
+        """Open csv writers for the current trajectory folder."""
+        self.dataset_file = open(self.save_path, mode="w", newline="")
+        writer = csv.writer(self.dataset_file)
+        writer.writerow(header)
+
+        sensor = self.env.unwrapped.scene["robot_contact"]
+        link_names = sensor.body_names
+        self.contact_file = open(
+            os.path.join(self.base_dir, "contact_force.csv"),
+            "w", newline=""
+        )
+        self.contact_writer = csv.writer(self.contact_file)
+        contact_header = ["step"]
+        for name in link_names:
+            contact_header += [f"{name}_x", f"{name}_y", f"{name}_z"]
+        self.contact_writer.writerow(contact_header)
+        return writer
+
+    def _close_data_writers(self):
+        """Close all active trajectory files safely."""
+        if self.dataset_file is not None:
+            self.dataset_file.close()
+            self.dataset_file = None
+        if self.contact_file is not None:
+            self.contact_file.close()
+            self.contact_file = None
+        self.contact_writer = None
+
 
     def quat_to_yaw(self, quat):
         w, x, y, z = quat  
@@ -436,10 +507,13 @@ class G1TurningCollector:
         scene = self.env.unwrapped.scene
         robot = scene["robot"]
 
-        root_pose = torch.tensor([[0.0, 0.0, 0.8, 1.0, 0.0, 0.0, 0.0]], device=self.device)
-        robot.write_root_pose_to_sim(root_pose)
-
+        # Generate waypoints per trajectory (dynamic each reset).
+        self.waypoint = self._generate_random_waypoint_sequence()
         waypoints = self._waypoints_to_list(self.waypoint)
+        start_xy = np.array(waypoints[0], dtype=np.float64)
+        root_pose = torch.tensor([[float(start_xy[0]), float(start_xy[1]), 0.8, 1.0, 0.0, 0.0, 0.0]], device=self.device)
+        robot.write_root_pose_to_sim(root_pose)
+        self._add_waypoint_marker()
 
         print(f"[INFO] Running {num_steps} steps through {len(waypoints)} waypoints: {waypoints}")
 
@@ -451,14 +525,14 @@ class G1TurningCollector:
         current_target_idx = 0
         threshold_deg = 55
         target = np.array(waypoints[current_target_idx])
+        trajectory_count = 1
+        trajectory_step = 0
 
         prev_yaw = 0.0
         prev_theta_v = 0.0
 
         # --- Data collection ---
         if self.collect_data:
-            f = open(self.save_path, mode="w", newline="")
-            writer = csv.writer(f)
             N = self.num_joints
             header = (
                 ["sim_step", "sim_time_s"] +
@@ -473,24 +547,7 @@ class G1TurningCollector:
                 ["vx_cmd", "vy_cmd", "yaw_rate_cmd"] +
                 ["target_x", "target_y"]
             )
-            writer.writerow(header)
-
-            # ===== CONTACT CSV =====
-            sensor = self.env.unwrapped.scene["robot_contact"]
-            link_names = sensor.body_names
-
-            self.contact_file = open(
-                os.path.join(self.base_dir, "contact_force.csv"),
-                "w", newline=""
-            )
-            self.contact_writer = csv.writer(self.contact_file)
-
-            contact_header = ["step"]
-            for name in link_names:
-                contact_header += [f"{name}_x", f"{name}_y", f"{name}_z"]
-
-            self.contact_writer.writerow(contact_header)
-
+            writer = self._open_data_writers(header)
 
         else:
             writer = None
@@ -521,8 +578,38 @@ class G1TurningCollector:
                 #print(f"[INFO] Reached waypoint {current_target_idx+1}/{len(waypoints)} at step {step}, dist={dist:.3f}")
                 current_target_idx += 1
                 if current_target_idx >= len(waypoints):
-                    #print("[INFO] All waypoints reached. Stopping.")
-                    break
+                    print(f"[INFO] Trajectory #{trajectory_count} completed at global step {step}. Reset to start.")
+                    trajectory_count += 1
+                    current_target_idx = 0
+
+                    # reset robot/environment state to start the next trajectory
+                    obs, _ = self.env.reset()
+                    self.waypoint = self._generate_random_waypoint_sequence()
+                    waypoints = self._waypoints_to_list(self.waypoint)
+                    target = np.array(waypoints[current_target_idx])
+                    start_xy = np.array(waypoints[0], dtype=np.float64)
+                    root_pose = torch.tensor(
+                        [[float(start_xy[0]), float(start_xy[1]), 0.8, 1.0, 0.0, 0.0, 0.0]],
+                        device=self.device
+                    )
+                    robot.write_root_pose_to_sim(root_pose)
+                    self.commands[:] = 0.0
+                    prev_yaw_rate = 0.0
+                    prev_yaw = 0.0
+                    prev_theta_v = 0.0
+                    trajectory_step = 0
+                    self._add_waypoint_marker()
+
+                    if self.collect_data:
+                        assert writer is not None
+                        self._close_data_writers()
+                        self._create_new_trajectory_output()
+                        writer = self._open_data_writers(header)
+                        self.camera_frame_idx = 0
+                        self.lidar_frame_idx = 0
+                        self.next_camera_time_s = 0.0
+                        self.next_lidar_time_s = 0.0
+                    continue
                 else:
                     target = np.array(waypoints[current_target_idx])
                     #print(f"[INFO] Switching to next waypoint: {target}")
@@ -683,8 +770,8 @@ class G1TurningCollector:
                 torques = data.applied_torque[0, :self.num_joints].cpu().numpy()
                 actions_np = actions[0,:self.num_joints].detach().cpu().numpy()
                 commands_np = self.commands[0].detach().cpu().numpy()
-                sim_step = float(step)
-                sim_time_s = step * self.sim_dt
+                sim_step = float(trajectory_step)
+                sim_time_s = trajectory_step * self.sim_dt
 
                 row = np.concatenate([
                     np.array([sim_step, sim_time_s], dtype=np.float64),
@@ -701,6 +788,7 @@ class G1TurningCollector:
                 for i in range(contact.shape[0]):
                     contact_row += contact[i].tolist()
 
+                assert self.contact_writer is not None
                 self.contact_writer.writerow(contact_row)
 
 
@@ -730,11 +818,10 @@ class G1TurningCollector:
                     )
                     self.lidar_frame_idx += 1
                     self.next_lidar_time_s += self.lidar_period_s
+            trajectory_step += 1
         
         if self.collect_data and writer is not None:
-            f.close()
-            if getattr(self, "contact_file", None) is not None:
-                self.contact_file.close()
+            self._close_data_writers()
             print(f"[INFO] Trajectory folder: {os.path.abspath(self.base_dir)}")
             print(f"[INFO] Dataset saved to: {os.path.abspath(self.save_path)}")
             print(f"[INFO] Images written to: {os.path.abspath(self.image_dir)}")
@@ -748,7 +835,7 @@ def main():
     vx=args_cli.vx,
     vy=args_cli.vy,
     yaw_rate=args_cli.yaw_rate,
-    waypoint=[(0,0),(1, 0), (2, 1), (3, 0)], 
+    waypoint=[(0,0),(1, 0), (2, 1), (3,0)], 
     img_res=(640, 480),
     save_every=1,
     collect_data=collect_flag,

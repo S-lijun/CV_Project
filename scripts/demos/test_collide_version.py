@@ -11,7 +11,6 @@ import sys
 import torch
 import numpy as np
 import argparse
-from datetime import datetime
 
 # ---------------------------------------------------------------------
 # Isaac Lab launcher
@@ -44,8 +43,6 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.flat_env_cfg import G1FlatEnvCfg_PLAY
 from isaaclab.sensors import CameraCfg
 from isaaclab.sensors.ray_caster import RayCasterCfg, patterns
-from isaaclab.sensors import ContactSensorCfg
-
 import isaaclab.sim as sim_utils
 from pxr import UsdGeom, Gf, Sdf
 import omni.usd
@@ -57,20 +54,6 @@ ISAACLAB_LEG_IDXS = torch.tensor([
 
 class G1TurningCollector:
     """Collect locomotion data with correct yaw-angle normalization."""
-
-    @staticmethod
-    def _waypoints_to_list(waypoint) -> list:
-        """Single point (2,) -> [pt]; multiple (N,2) -> list of N points.
-
-        Do not use ``isinstance(wp[0], float)``: ``np.float32`` is not a Python float,
-        so a length-2 array would be mistaken for two separate scalars and break indexing.
-        """
-        w = np.asarray(waypoint, dtype=np.float64)
-        if w.ndim == 1 and w.size == 2:
-            return [w]
-        if w.ndim == 2 and w.shape[1] == 2:
-            return [w[i] for i in range(w.shape[0])]
-        raise ValueError(f"waypoint must be shape (2,) or (N, 2), got {w.shape}")
 
     def __init__(self, vx=0.5, vy=0.0, yaw_rate=0.0,
                  waypoint=(2.0, 1.0), img_res=(640, 480),
@@ -90,39 +73,24 @@ class G1TurningCollector:
         env_cfg.episode_length_s = 100000
         env_cfg.curriculum = None
         env_cfg.scene.robot.init_state.rot = (0.0, 0.0, 0.0, 1.0) 
-        # End-to-end 200 Hz control/data loop: dt=0.005, decimation=1.
-        env_cfg.decimation = 1
-        env_cfg.sim.render_interval = 1
 
         # disable torso-contact termination so collisions with objects don't reset the env
         env_cfg.terminations.base_contact = None ###WE ADDED THIS HERE TO FIX ENV RESET WHEN WE HIT TORSO OF HUMANOID AND OBSTALE
 
-        # --- Add Obstacle below ---
+        # --- Add Obstacle if you want ---
         # self._add_obstacle_cube(env_cfg, pos=(2, 0.0, 5.25), size=(0.5, 1.0, 0.5),index=0)
-        #self._add_blue_bin(env_cfg, pos=(2, 0, 0.25),index=0)
-        self._add_table(env_cfg, pos=(2, 0, 0.25),index=0)
+        self._add_blue_bin(env_cfg, pos=(2, 0, 0.25),index=0)
+        #self._add_table(env_cfg, pos=(2, 2, 0.25),index=0)
 
 
-        # --- Add Obstacle above ---
-        
-        env_cfg.scene.robot_contact = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/.*link.*", 
-            update_period=0.0,
-            debug_vis=True,
-            filter_prim_paths_expr=[],
-        )
+        # --- Add Obstacle if you want ---
         
         
-        # --- Sensor target rates (aligned to real robot) ---
-        self.camera_fps = 15.0
-        self.lidar_fps = 7.0
-        self.camera_period_s = 1.0 / self.camera_fps
-        self.lidar_period_s = 1.0 / self.lidar_fps
-
+        
         # --- Add camera ---
         env_cfg.scene.camera = CameraCfg(
             prim_path="{ENV_REGEX_NS}/Robot/head_link/front_camera",
-            update_period=self.camera_period_s,
+            update_period=0.05,
             height=img_res[0],
             width=img_res[1],
             data_types=["rgb"],
@@ -143,7 +111,7 @@ class G1TurningCollector:
         # --- Add lidar ---
         env_cfg.scene.lidar = RayCasterCfg(
             prim_path="{ENV_REGEX_NS}/Robot/head_link",   
-            update_period=self.lidar_period_s,
+            update_period=0.05,
 
             offset=RayCasterCfg.OffsetCfg(
                 pos=(0.0, 0.0, 0.0),
@@ -155,7 +123,7 @@ class G1TurningCollector:
 
             pattern_cfg=patterns.LidarPatternCfg(
                 channels=32,                      # 垂直线数（先别太大）
-                vertical_fov_range=(-20, 20),
+                vertical_fov_range=(-90, 90),
                 horizontal_fov_range=(-180, 180),
                 horizontal_res=2.0,              # 分辨率（deg）
             ),
@@ -166,14 +134,6 @@ class G1TurningCollector:
         # --- Create environment ---
         self.env = RslRlVecEnvWrapper(ManagerBasedRLEnv(cfg=env_cfg))
         self.device = self.env.unwrapped.device
-        self.sim_dt = float(self.env.unwrapped.cfg.sim.dt)
-        self.sim_hz = 1.0 / self.sim_dt
-        print(f"[INFO] Control/data loop set to {self.sim_hz:.1f} Hz (dt={self.sim_dt:.4f}s)")
-        print(f"[INFO] Camera/LiDAR target rates: {self.camera_fps:.1f} Hz / {self.lidar_fps:.1f} Hz")
-        self.next_camera_time_s = 0.0
-        self.next_lidar_time_s = 0.0
-        self.camera_frame_idx = 0
-        self.lidar_frame_idx = 0
         # load custom scene
         self._load_scene_usd()
 
@@ -191,29 +151,26 @@ class G1TurningCollector:
         self.max_speed = float(np.linalg.norm([vx, vy]))
         self.save_every = save_every
 
-        # --- Output dirs: data/<timestamp>/ = one trajectory run ---
-        data_parent = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data"))
-        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # ms resolution
-        self.base_dir = os.path.join(data_parent, run_stamp)
-        os.makedirs(self.base_dir, exist_ok=True)
+        # --- Output dirs ---
+        self.base_dir = os.path.join(os.path.dirname(__file__), "../../data")
         self.image_dir = os.path.join(self.base_dir, "images")
         os.makedirs(self.image_dir, exist_ok=True)
-        self.lidar_dir = os.path.join(self.base_dir, "lidar")
-        os.makedirs(self.lidar_dir, exist_ok=True)
-        self.save_path = os.path.join(self.base_dir, "locomotion_dataset.csv")
-        print(f"[INFO] Trajectory folder: {self.base_dir}")
+        self.save_path = os.path.join(self.base_dir, "g1_turning_yawfix_dataset.csv")
 
         # --- Robot info ---
         robot = self.env.unwrapped.scene["robot"]
         self.num_joints = robot.data.joint_pos.shape[1]
-        print(f"[INFO] Detected {self.num_joints} actuated joints. Waypoint = {self.waypoint}")
         #print(f"[INFO] Detected {self.num_joints} actuated joints. Waypoint = {self.waypoint}")
 
         # --- Camera handle ---
         self.camera = self.env.unwrapped.scene["camera"]
-        print(f"[INFO] Camera initialized. Data collection = {self.collect_data}")
+        #print(f"[INFO] Camera initialized. Data collection = {self.collect_data}")
 
-        # --- lidar handle (directory already created above) ---
+         # --- lidar handle ---
+        self.lidar_dir = os.path.join(self.base_dir, "lidar")
+        os.makedirs(self.lidar_dir, exist_ok=True)
+
+
 
         # --- Add waypoint marker (green sphere) ---
         self._add_waypoint_marker()
@@ -231,7 +188,7 @@ class G1TurningCollector:
         prim_path = "/World/ExternalScene"
 
         if stage.GetPrimAtPath(prim_path):
-            print("[INFO] Scene already exists")
+            #print("[INFO] Scene already exists")
             return
 
         prim = stage.DefinePrim(prim_path, "Xform")
@@ -330,11 +287,10 @@ class G1TurningCollector:
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
                     collision_props=sim_utils.CollisionPropertiesCfg(),
                     mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
-                    scale=(0.65, 0.65, 0.65),
+                    scale=(0.75, 0.75, 0.75),
                 ),
-                # Quaternion is (w, x, y, z):
-                # keep upright (original qx90) and rotate heading by 90deg.
-                init_state=RigidObjectCfg.InitialStateCfg(pos=pos, rot=(0.5, 0.5, 0.5, 0.5)),
+                # init_state=RigidObjectCfg.InitialStateCfg(pos=pos,rot=(0.51,-0.495,0.49,-0.5)),
+                init_state=RigidObjectCfg.InitialStateCfg(pos=pos, rot=(0.707, 0.707, 0, 0)),
             )
         )
         #print(f"[INFO] Added blue bin at {pos}")
@@ -344,8 +300,6 @@ class G1TurningCollector:
 
         import isaaclab.sim as sim_utils
         from isaaclab.assets import RigidObjectCfg
-        from isaaclab.sim.converters import MeshConverterCfg, MeshConverter
-        from isaaclab.sim.schemas import schemas_cfg
 
         name = f"table_{index}"
 
@@ -364,7 +318,7 @@ class G1TurningCollector:
             force_usd_conversion=False,
             collision_props=sim_utils.CollisionPropertiesCfg(
             ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=4.0),
+            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
             mesh_collision_props=schemas_cfg.ConvexDecompositionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
             ),
@@ -381,10 +335,10 @@ class G1TurningCollector:
                     usd_path=converter.usd_path,
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
                     collision_props=sim_utils.CollisionPropertiesCfg(),
-                    mass_props=sim_utils.MassPropertiesCfg(mass=4.0),
-                    scale=(1, 1, 1),
+                    mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
                 ),
-                init_state=RigidObjectCfg.InitialStateCfg(pos=pos,rot=(0.5, 0.5, 0.5, 0.5)),
+                init_state=RigidObjectCfg.InitialStateCfg(pos=pos,rot=(0.51,0.71,0,0)),
+                scale=(0.75, 0.75, 0.75),
             )
         )
         #print(f"[INFO] Added table at {pos}")
@@ -395,7 +349,11 @@ class G1TurningCollector:
         """Add green sphere markers for all waypoints."""
         stage = self.env.unwrapped.scene.stage
 
-        waypoints = self._waypoints_to_list(self.waypoint)
+        
+        if isinstance(self.waypoint[0], (float, int)):
+            waypoints = [self.waypoint]
+        else:
+            waypoints = self.waypoint
 
         for i, wp in enumerate(waypoints):
             sphere_path = Sdf.Path(f"/World/WaypointMarker_{i}")
@@ -407,8 +365,8 @@ class G1TurningCollector:
             sphere.CreateVisibilityAttr().Set("invisible")
 
             #color_attr = sphere.CreateDisplayColorAttr()
-            #color_attr.Set([(0.0, 1.0, 0.0)])  
-        print(f"[INFO] Added {len(waypoints)} waypoint markers.")
+            #color_attr.Set([(0.0, 1.0, 0.0)])  # 绿色
+        #print(f"[INFO] Added {len(waypoints)} waypoint markers.")
 
 
     def quat_to_yaw(self, quat):
@@ -436,14 +394,18 @@ class G1TurningCollector:
         scene = self.env.unwrapped.scene
         robot = scene["robot"]
 
-        root_pose = torch.tensor([[0.0, 0.0, 0.8, 1.0, 0.0, 0.0, 0.0]], device=self.device)
+        root_pose = torch.tensor([[0.0, 0.0, 0.65, 1.0, 0.0, 0.0, 0.0]], device=self.device)
         robot.write_root_pose_to_sim(root_pose)
 
-        waypoints = self._waypoints_to_list(self.waypoint)
+        # support multi waypoints
+        if isinstance(self.waypoint[0], (float, int)):
+            waypoints = [self.waypoint]
+        else:
+            waypoints = self.waypoint
 
-        print(f"[INFO] Running {num_steps} steps through {len(waypoints)} waypoints: {waypoints}")
+        #print(f"[INFO] Running {num_steps} steps through {len(waypoints)} waypoints: {waypoints}")
 
-        stop_thresh = 0.1
+        stop_thresh = 0.25
         k_yaw = 1.0
         max_yaw_rate = 1.0
         yaw_smooth = 0.1
@@ -461,37 +423,18 @@ class G1TurningCollector:
             writer = csv.writer(f)
             N = self.num_joints
             header = (
-                ["sim_step", "sim_time_s"] +
-                ["px", "py", "pz"] +
+                [f"base_pos_{i}" for i in range(3)] +
                 [f"base_quat_{i}" for i in range(4)] +
-                ["base_lin_vel_x", "base_lin_vel_y", "base_lin_vel_z"] +
-                ["base_ang_vel_x", "base_ang_vel_y", "base_ang_vel_z"] +
+                [f"base_lin_vel_{i}" for i in range(3)] +
+                [f"base_ang_vel_{i}" for i in range(3)] +
                 [f"joint_pos_{i}" for i in range(N)] +
                 [f"joint_vel_{i}" for i in range(N)] +
                 [f"torque_{i}" for i in range(N)] +
                 [f"action_{i}" for i in range(N)] +
-                ["vx_cmd", "vy_cmd", "yaw_rate_cmd"] +
+                [f"command_{i}" for i in range(3)] +
                 ["target_x", "target_y"]
             )
             writer.writerow(header)
-
-            # ===== CONTACT CSV =====
-            sensor = self.env.unwrapped.scene["robot_contact"]
-            link_names = sensor.body_names
-
-            self.contact_file = open(
-                os.path.join(self.base_dir, "contact_force.csv"),
-                "w", newline=""
-            )
-            self.contact_writer = csv.writer(self.contact_file)
-
-            contact_header = ["step"]
-            for name in link_names:
-                contact_header += [f"{name}_x", f"{name}_y", f"{name}_z"]
-
-            self.contact_writer.writerow(contact_header)
-
-
         else:
             writer = None
 
@@ -591,7 +534,7 @@ class G1TurningCollector:
             prev_yaw_rate = yaw_rate
 
             # ===== Smooth linear velocity commands (VERY IMPORTANT) =====
-            alpha = 1   # smoothing factor 0.1~0.3
+            alpha = 0.2   # smoothing factor 0.1~0.3
             prev_vx = self.commands[0,0].item()
             prev_vy = self.commands[0,1].item()
 
@@ -611,71 +554,57 @@ class G1TurningCollector:
             obs["policy"][0, 11] = self.commands[0, 2]
 
 
-            print(f"obs: {obs}")
+            # #print(f"obs: {obs}")
             vec = obs["policy"][0]
 
-            print("base_lin_vel:", vec[0:3])
-            print("base_ang_vel:", vec[3:6])
-            print("proj_gravity:", vec[6:9])
-            print("commands:", vec[9:12])
-            print("joint_pos:", vec[12:49])
-            print("joint_vel:", vec[49:86])
-            print("actions:", vec[86:123])
+            # #print("base_lin_vel:", vec[0:3])
+            # #print("base_ang_vel:", vec[3:6])
+            # #print("proj_gravity:", vec[6:9])
+            # #print("commands:", vec[9:12])
+            # #print("joint_pos:", vec[12:49])
+            # #print("joint_vel:", vec[49:86])
+            # #print("actions:", vec[86:123])
             # RL policy
             with torch.inference_mode():
                 # write to env
 
                 actions = self.policy(obs)
-                print(f"actions: {actions}")
+                # #print(f"actions: {actions}")
 
             #idx12 = [0,1,3,4,7,8,11,12,15,16,19,20]
-            #actions_new = torch.zeros_like(actions)
+            #action_new = torch.zeros_like(actions)
             #for i,new_i in enumerate(idx12):
-                #actions_new[:, new_i] = actions[:, new_i]   # 保留这12维
-            #print(f"action_new: {actions_new}")
+                #action_new[:, new_i] = actions[:, new_i]   # 保留这12维
+            ##print(f"action_new: {action_new}")
             
             obs, _, _, _ = self.env.step(actions)
 
-
-            # ===== CONTACT =====
-            sensor = self.env.unwrapped.scene["robot_contact"]
-
-            print("Contact Force:")
-            print(sensor.body_names)
-            print(sensor.data.net_forces_w)
-
             # =========================
-            # LIDAR COLLECTION 
+            # LIDAR COLLECTION (正确位置)
             # =========================
             lidar = self.env.unwrapped.scene["lidar"]
 
             lidar_points = lidar.data.ray_hits_w[0]   # (N_rays, 3)
             lidar_np = lidar_points.detach().cpu().numpy()
+
+            # 防 nan
             lidar_np = np.nan_to_num(lidar_np, nan=0.0, posinf=0.0, neginf=0.0)
 
-
-            print(f"lidar_np: {lidar_np}")
-            print(f"base pose: {base_pos}")
-
             # 转 range
-            #origin = base_pos
-            #ranges = np.linalg.norm(lidar_np - origin, axis=1)
-
-            ranges = np.linalg.norm(lidar_np, axis=1)
-            print(f"ranges: {ranges}")
+            origin = base_pos
+            ranges = np.linalg.norm(lidar_np - origin, axis=1)
 
             # debug 
-            print("lidar shape:", lidar_np.shape)
-            print("lidar min/max:", ranges.min(), ranges.max())
+            # #print("lidar shape:", lidar_np.shape)
+            # #print("lidar min/max:", ranges.min(), ranges.max())
                 
 
-            # Locomotion printing
-            print(f"[STEP {step}] Target={target}, dist={dist:.2f}, yaw={np.degrees(yaw):.1f}°, "
-                f"vx={vx_cmd:.2f}, vy={vy_cmd:.2f}, yaw_rate={np.degrees(yaw_rate):.1f}°/s")
+            # debug
+            # #print(f"[STEP {step}] Target={target}, dist={dist:.2f}, yaw={np.degrees(yaw):.1f}°, "
+            #     f"vx={vx_cmd:.2f}, vy={vy_cmd:.2f}, yaw_rate={np.degrees(yaw_rate):.1f}°/s")
 
             # save data
             if self.collect_data:
-                assert writer is not None
                 base_lin_vel = data.root_lin_vel_w[0].cpu().numpy()
                 base_ang_vel = data.root_ang_vel_w[0].cpu().numpy()
                 joint_pos = data.joint_pos[0, :self.num_joints].cpu().numpy()
@@ -683,62 +612,44 @@ class G1TurningCollector:
                 torques = data.applied_torque[0, :self.num_joints].cpu().numpy()
                 actions_np = actions[0,:self.num_joints].detach().cpu().numpy()
                 commands_np = self.commands[0].detach().cpu().numpy()
-                sim_step = float(step)
-                sim_time_s = step * self.sim_dt
 
                 row = np.concatenate([
-                    np.array([sim_step, sim_time_s], dtype=np.float64),
                     base_pos, base_quat, base_lin_vel, base_ang_vel,
                     joint_pos, joint_vel, torques, actions_np, commands_np, target
                 ])
                 writer.writerow(row.tolist())
 
-
-                # ===== CONTACT SAVE =====
-                contact = sensor.data.net_forces_w[0].detach().cpu().numpy()
-
-                contact_row = [step]
-                for i in range(contact.shape[0]):
-                    contact_row += contact[i].tolist()
-
-                self.contact_writer.writerow(contact_row)
-
-
-                # -------- Camera SAVE (15 FPS) --------
-                if sim_time_s + 1e-12 >= self.next_camera_time_s:
+                if step % self.save_every == 0:
+                    # -------- Camera SAVE --------
                     rgb_tensor = self.camera.data.output["rgb"][0]
+
                     rgb_np = rgb_tensor[..., :3].cpu().numpy()
 
+                    # if float
                     if rgb_np.dtype != np.uint8:
-                        rgb_np = (rgb_np * 255).clip(0, 255).astype(np.uint8)
+                        rgb_np = (rgb_np * 255).clip(0,255).astype(np.uint8)
 
+                    # rotate 90°
                     rgb_np = np.rot90(rgb_np, k=1)
 
                     import imageio
-                    imageio.imwrite(
-                        os.path.join(self.image_dir, f"rgb_{self.camera_frame_idx:06d}.png"),
-                        rgb_np,
-                    )
-                    self.camera_frame_idx += 1
-                    self.next_camera_time_s += self.camera_period_s
+                    imageio.imwrite(os.path.join(self.image_dir, f"rgb_{step:06d}.png"), rgb_np)
 
-                # -------- LIDAR SAVE (7 FPS) --------
-                if sim_time_s + 1e-12 >= self.next_lidar_time_s:
+                    #print(f"[DEBUG] Saved frame {step}")
+
+                    # -------- LIDAR SAVE --------
+                    lidar_dir = os.path.join(self.base_dir, "lidar")
+                    os.makedirs(lidar_dir, exist_ok=True)
+
                     np.save(
-                        os.path.join(self.lidar_dir, f"lidar_{self.lidar_frame_idx:06d}.npy"),
-                        ranges,
+                        os.path.join(lidar_dir, f"lidar_{step:06d}.npy"),
+                        ranges   
                     )
-                    self.lidar_frame_idx += 1
-                    self.next_lidar_time_s += self.lidar_period_s
         
         if self.collect_data and writer is not None:
             f.close()
-            if getattr(self, "contact_file", None) is not None:
-                self.contact_file.close()
-            print(f"[INFO] Trajectory folder: {os.path.abspath(self.base_dir)}")
-            print(f"[INFO] Dataset saved to: {os.path.abspath(self.save_path)}")
-            print(f"[INFO] Images written to: {os.path.abspath(self.image_dir)}")
-            print(f"[INFO] LiDAR written to: {os.path.abspath(self.lidar_dir)}")
+            #print(f"[INFO] Dataset saved to: {os.path.abspath(self.save_path)}")
+            #print(f"[INFO] Images written to: {os.path.abspath(self.image_dir)}")
 
 
 def main():
@@ -748,7 +659,7 @@ def main():
     vx=args_cli.vx,
     vy=args_cli.vy,
     yaw_rate=args_cli.yaw_rate,
-    waypoint=[(0,0),(1, 0), (2, 1), (3, 0)], 
+    waypoint=[(0,0),(8, 0.0)], 
     img_res=(640, 480),
     save_every=1,
     collect_data=collect_flag,
