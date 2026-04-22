@@ -626,7 +626,7 @@ def main():
         vx=args_cli.vx,
         vy=args_cli.vy,
         yaw_rate=args_cli.yaw_rate,
-        waypoint=[(0, 0), (2, 1), (3, 0)],
+        waypoint=[(0, 0), (2, 0.7), (3, 0)],
         img_res=(640, 480),
         save_every=1,
         collect_data=collect_flag,

@@ -161,8 +161,7 @@ class G1TurningCollector:
         # Only keys listed in ``trajectory_region_sequence`` are sampled each episode.
         self.trajectory_regions = {
             "front": {"center": np.array([0.0, 0], dtype=np.float64), "r": 0.5},
-            "front2": {"center": np.array([1.0, 0], dtype=np.float64), "r": 0.5},
-            "back": {"center": np.array([4, 0], dtype=np.float64), "r": 0.3},
+            "back": {"center": np.array([3, 0], dtype=np.float64), "r": 0.3},
             "left": {"center": np.array([2, 0.5], dtype=np.float64), "r": 0.2},
             "right": {"center": np.array([2, -0.5], dtype=np.float64), "r": 0.2},
             # Example extra region (uncomment and add to trajectory_region_sequence to use):
@@ -172,7 +171,6 @@ class G1TurningCollector:
         # Default matches old behavior: front -> (left or right) -> back.
         self.trajectory_region_sequence = [
             "front",
-            "front2",
             ("left", "right"),
             "back",
         ]
@@ -206,9 +204,9 @@ class G1TurningCollector:
 
         # --- Add obstacles (see data_collection_obstacles.py) ---
         # add_obstacle_cube(env_cfg, pos=(2, 0.0, 5.25), size=(0.5, 1.0, 0.5), index=0)
-        #add_blue_bin(env_cfg, pos=(2, 0, 0.5), index=0)
+        add_blue_bin(env_cfg, pos=(2, 0, 0.5), index=0)
         #add_table(env_cfg, pos=(2, 0, 0.5), index=0)
-        add_chair(env_cfg, pos=(2, 0, 0.5), index=0)
+        #add_chair(env_cfg, pos=(2, 0, 0.5), index=0)
         
         env_cfg.scene.robot_contact = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/Robot/.*link.*", 
