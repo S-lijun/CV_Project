@@ -13,7 +13,8 @@ scene/*
 !scene/.gitkeep
 scene_new/*
 !scene_new/.gitkeep
-data/*
+data/data/*
+data/drive-download-20260421T224126Z-3-001/*
 !data/.gitkeep
 
 # Data
