@@ -16,6 +16,8 @@ scene_new/*
 data/*
 !data/.gitkeep
 
+# Data
+
 # No USD files allowed in the repo
 **/*.usd
 **/*.usda

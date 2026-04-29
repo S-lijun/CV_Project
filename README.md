@@ -1,3 +1,89 @@
+# TA Setup & Reproduction Guide (Isaac Sim + Isaac Lab + Data Pipeline)
+
+## 1) Environment Setup
+
+Please follow **official NVIDIA documentation** for installation to avoid version mismatch.
+
+### 1.1 Install Isaac Sim 5.1 (pip method)
+- Go to NVIDIA official docs for Isaac Sim.
+- Follow the **pip install** instructions for **Isaac Sim 5.1** exactly as documented.
+- https://isaac-sim.github.io/IsaacLab/main/index.html
+
+> Note: Installation steps may change over time. Always prioritize the official page.
+
+### 1.2 Install Isaac Lab v2.2.3
+- Find the official Isaac Lab repository.
+- Checkout/install **version 2.2.3**.
+- Complete all dependency/setup steps from the repo README/docs.
+
+---
+
+## 2) Project Reproduction Flow
+
+After Isaac Sim + Isaac Lab are correctly installed, you can run this project.
+
+### 2.1 Data collection script
+- Main interactive data collection logic is in:
+
+`script/demos/DataCollection_loop_test.py`
+
+- Run this script to interactively collect trajectories.
+
+### 2.2 If you do NOT want to collect new data
+I already prepared two trajectories under:
+
+`data/drive-download-20260421T224126Z-3-001`
+
+You can directly use these trajectories for downstream analysis.
+
+---
+
+## 3) Analysis Notebook
+
+All post-processing and analysis are in:
+
+`data/project.ipynb`
+
+This includes YOLO / MiDaS / Optical Flow analysis and related plotting/export logic.
+
+---
+
+## 4) Path Awareness (Important)
+
+Please pay attention to working directory and relative paths.
+
+- Some code assumes you run from project root (`CV_Project`) or from `CV_Project/data`.
+- If path resolution fails, check:
+  - dataset root path
+  - export path (e.g., `data/data/trajectory_exports/...`)
+  - selected trajectory name in notebook config
+
+---
+
+## 5) Minimal Reproduction Checklist
+
+- [ ] Isaac Sim 5.1 installed via official pip instructions  
+- [ ] Isaac Lab v2.2.3 installed from official repo  
+- [ ] Project dependencies available in the same Python environment  
+- [ ] Either:
+  - [ ] Collect new trajectories via `script/demos/DataCollection_loop_test.py`, or
+  - [ ] Use existing trajectories in `data/drive-download-20260421T224126Z-3-001`  
+- [ ] Run `data/project.ipynb` cells in order  
+- [ ] Verify outputs under export folders (`Plots`, videos, images)
+
+---
+If anything breaks, first verify version alignment (Isaac Sim 5.1 + Isaac Lab 2.2.3) and path configuration.
+
+
+**The Output from this notebook should be in data/trajectory_exports**
+# TA should read the above!
+
+
+
+
+
+
+
 ![Isaac Lab](docs/source/_static/isaaclab.jpg)
 
 ---
